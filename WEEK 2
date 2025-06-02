@@ -1,0 +1,288 @@
+-- QUERY 1
+CREATE PROCEDURE InsertOrderDetails
+    @OrderID INT,
+    @ProductID INT,
+    @UnitPrice MONEY = NULL,
+    @Quantity INT,
+    @Discount DECIMAL(5,2) = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @ActualUnitPrice MONEY;
+    DECLARE @StockQty INT;
+    DECLARE @ReorderPoint INT;
+
+    SELECT 
+        @StockQty = Quantity, 
+        @ReorderPoint = ReorderPoint
+    FROM Production.ProductInventory
+    WHERE ProductID = @ProductID;
+
+    IF @StockQty IS NULL OR @StockQty < @Quantity
+    BEGIN
+        PRINT 'Failed to place the order. Please try again.';
+        RETURN;
+    END
+
+    IF @UnitPrice IS NULL
+    BEGIN
+        SELECT @ActualUnitPrice = ListPrice
+        FROM Production.Product
+        WHERE ProductID = @ProductID;
+    END
+    ELSE
+        SET @ActualUnitPrice = @UnitPrice;
+
+    IF @Discount IS NULL
+        SET @Discount = 0;
+
+    INSERT INTO Sales.SalesOrderDetail
+        (SalesOrderID, ProductID, OrderQty, UnitPrice, UnitPriceDiscount)
+    VALUES
+        (@OrderID, @ProductID, @Quantity, @ActualUnitPrice, @Discount);
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        PRINT 'Failed to place the order. Please try again.';
+        RETURN;
+    END
+
+    UPDATE Production.ProductInventory
+    SET Quantity = Quantity - @Quantity
+    WHERE ProductID = @ProductID;
+
+    SELECT @StockQty = Quantity
+    FROM Production.ProductInventory
+    WHERE ProductID = @ProductID;
+
+    IF @StockQty < @ReorderPoint
+    BEGIN
+        PRINT 'Warning: Quantity in stock has dropped below the reorder level.';
+    END
+
+
+
+
+-- QUERY 2
+CREATE PROCEDURE UpdateOrderDetails
+    @OrderID INT,
+    @ProductID INT,
+    @UnitPrice MONEY = NULL,
+    @Quantity INT = NULL,
+    @Discount DECIMAL(5,2) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @OldQuantity INT;
+    DECLARE @NewQuantity INT;
+
+    -- Get the current quantity for this order detail
+    SELECT @OldQuantity = OrderQty
+    FROM Sales.SalesOrderDetail
+    WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+    -- Update the order detail, keeping old values if new ones are NULL
+    UPDATE Sales.SalesOrderDetail
+    SET
+        UnitPrice = ISNULL(@UnitPrice, UnitPrice),
+        OrderQty = ISNULL(@Quantity, OrderQty),
+        UnitPriceDiscount = ISNULL(@Discount, UnitPriceDiscount)
+    WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+
+    -- If quantity was updated, adjust inventory
+    IF @Quantity IS NOT NULL
+    BEGIN
+        SET @NewQuantity = @Quantity;
+
+        -- Update ProductInventory: increase or decrease stock based on quantity change
+        UPDATE Production.ProductInventory
+        SET Quantity = Quantity + (@OldQuantity - @NewQuantity)
+        WHERE ProductID = @ProductID;
+    END
+END
+
+-- Query 3
+
+CREATE PROCEDURE GetOrderDetails
+    @OrderID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Check if any records exist for the given OrderID
+    IF NOT EXISTS (
+        SELECT 1
+        FROM Sales.SalesOrderDetail
+        WHERE SalesOrderID = @OrderID
+    )
+    BEGIN
+        PRINT 'The OrderID ' + CAST(@OrderID AS VARCHAR(20)) + ' does not exist';
+        RETURN 1;
+    END
+
+    -- Return all records for the given OrderID
+    SELECT *
+    FROM Sales.SalesOrderDetail
+    WHERE SalesOrderID = @OrderID;
+END
+
+-- Query 4
+CREATE PROCEDURE DeleteOrderDetails
+    @OrderID INT,
+    @ProductID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Validate that the order and product combination exists
+    IF NOT EXISTS (
+        SELECT 1
+        FROM Sales.SalesOrderDetail
+        WHERE SalesOrderID = @OrderID AND ProductID = @ProductID
+    )
+    BEGIN
+        PRINT 'Invalid parameters: OrderID or ProductID does not exist in the order.';
+        RETURN -1;
+    END
+
+    -- Delete the order detail row
+    DELETE FROM Sales.SalesOrderDetail
+    WHERE SalesOrderID = @OrderID AND ProductID = @ProductID;
+END
+
+-- Query 5
+CREATE FUNCTION dbo.FormatDate_MMDDYYYY (@InputDate DATETIME)
+RETURNS VARCHAR(10)
+AS
+BEGIN
+    RETURN CONVERT(VARCHAR(10), @InputDate, 101)
+END
+
+-- Query 6
+CREATE FUNCTION dbo.FormatDate_YYYYMMDD (@InputDate DATETIME)
+RETURNS CHAR(8)
+AS
+BEGIN
+    RETURN CONVERT(CHAR(8), @InputDate, 112)
+END
+
+-- Query 8
+CREATE VIEW vwCustomerOrders AS
+SELECT
+    c.CompanyName,
+    soh.SalesOrderID AS OrderID,
+    soh.OrderDate,
+    sod.ProductID,
+    p.Name AS ProductName,
+    sod.OrderQty AS Quantity,
+    sod.UnitPrice,
+    sod.OrderQty * sod.UnitPrice AS TotalPrice
+FROM
+    Sales.SalesOrderHeader soh
+    INNER JOIN Sales.Customer c ON soh.CustomerID = c.CustomerID
+    INNER JOIN Sales.SalesOrderDetail sod ON soh.SalesOrderID = sod.SalesOrderID
+    INNER JOIN Production.Product p ON sod.ProductID = p.ProductID
+
+-- Query 9
+CREATE VIEW vwCustomerOrders_Yesterday AS
+SELECT
+    c.CompanyName,
+    soh.SalesOrderID AS OrderID,
+    soh.OrderDate,
+    sod.ProductID,
+    p.Name AS ProductName,
+    sod.OrderQty AS Quantity,
+    sod.UnitPrice,
+    sod.OrderQty * sod.UnitPrice AS TotalPrice
+FROM
+    Sales.SalesOrderHeader soh
+    INNER JOIN Sales.Customer c ON soh.CustomerID = c.CustomerID
+    INNER JOIN Sales.SalesOrderDetail sod ON soh.SalesOrderID = sod.SalesOrderID
+    INNER JOIN Production.Product p ON sod.ProductID = p.ProductID
+WHERE
+    soh.OrderDate >= CAST(DATEADD(day, -1, CAST(GETDATE() AS date)) AS datetime)
+    AND soh.OrderDate < CAST(GETDATE() AS date)
+
+-- Query 11
+CREATE VIEW MyProducts AS
+SELECT
+    p.ProductID,
+    p.ProductName,
+    p.QuantityPerUnit,
+    p.UnitPrice,
+    s.CompanyName,
+    c.CategoryName
+FROM
+    Products p
+    INNER JOIN Suppliers s ON p.SupplierID = s.SupplierID
+    INNER JOIN Categories c ON p.CategoryID = c.CategoryID
+WHERE
+    p.Discontinued = 0
+
+-- Query 12
+CREATE TRIGGER trg_InsteadOfDelete_Orders
+ON Orders
+INSTEAD OF DELETE
+AS
+BEGIN
+    -- First, delete all related records from Order Details
+    DELETE FROM [Order Details]
+    WHERE OrderID IN (SELECT OrderID FROM deleted);
+
+    -- Then, delete the order from Orders table
+    DELETE FROM Orders
+    WHERE OrderID IN (SELECT OrderID FROM deleted);
+END
+
+-- Query 13
+CREATE TRIGGER trg_CheckStockBeforeInsert
+ON Sales.SalesOrderDetail
+INSTEAD OF INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Loop through each inserted row (handle multi-row inserts)
+    DECLARE @ProductID INT, @OrderQty INT, @LocationID INT, @InventoryQty INT;
+
+    DECLARE InsertedCursor CURSOR FOR
+        SELECT ProductID, OrderQty
+        FROM inserted;
+
+    OPEN InsertedCursor;
+    FETCH NEXT FROM InsertedCursor INTO @ProductID, @OrderQty;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- Find the LocationID for inventory (assuming 1 for simplicity; adjust as needed)
+        SET @LocationID = 1;
+
+        -- Get current inventory for the product at the location
+        SELECT @InventoryQty = Quantity
+        FROM Production.ProductInventory
+        WHERE ProductID = @ProductID AND LocationID = @LocationID;
+
+        IF @InventoryQty IS NULL OR @InventoryQty < @OrderQty
+        BEGIN
+            -- Not enough stock, raise error and do not insert
+            RAISERROR ('Order cannot be placed: insufficient stock for ProductID %d.', 16, 1, @ProductID);
+        END
+        ELSE
+        BEGIN
+            -- Sufficient stock, insert order and update inventory
+            INSERT INTO Sales.SalesOrderDetail
+            SELECT * FROM inserted WHERE ProductID = @ProductID;
+
+            UPDATE Production.ProductInventory
+            SET Quantity = Quantity - @OrderQty
+            WHERE ProductID = @ProductID AND LocationID = @LocationID;
+        END
+
+        FETCH NEXT FROM InsertedCursor INTO @ProductID, @OrderQty;
+    END
+
+    CLOSE InsertedCursor;
+    DEALLOCATE InsertedCursor;
+END
